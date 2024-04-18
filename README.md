@@ -1,1 +1,5 @@
-# finetune-llm
+# Finetune LLM
+
+```bash
+huggingface-cli login
+```

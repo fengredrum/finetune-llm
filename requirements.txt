@@ -1,0 +1,9 @@
+huggingface_hub[cli]
+git+https://github.com/huggingface/transformers.git@ec92f983af5295fc92414a37b988d8384785988a
+accelerate
+bitsandbytes
+flash_attn
+peft
+datasets
+evaluate
+tensorboard
