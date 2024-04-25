@@ -1,37 +1,28 @@
+import torch
+
 from datasets import load_dataset
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from transformers import set_seed
 from transformers import (
-    set_seed,
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    HfArgumentParser,
-    AutoTokenizer,
     TrainingArguments,
     Trainer,
-    GenerationConfig,
+    DataCollatorForLanguageModeling,
 )
-from tqdm import tqdm
-from trl import SFTTrainer
-import torch
-import time
-import pandas as pd
-import numpy as np
+
 
 seed = 42
 set_seed(seed)
 
-model_name = "Qwen/Qwen1.5-MoE-A2.7B"
-
+model_name = "meta-llama/Meta-Llama-3-8B"
 dataset_name = "neil-code/dialogsum-test"
-dataset = load_dataset(dataset_name)
-print(dataset)
-print(dataset["train"][0])
 
-compute_dtype = getattr(torch, "float16")
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=compute_dtype,
+    bnb_4bit_compute_dtype=torch.bfloat16,
     bnb_4bit_use_double_quant=False,
 )
 
@@ -55,7 +46,7 @@ tokenizer.pad_token = tokenizer.eos_token
 
 
 def gen(model, p, maxlen=100, sample=True):
-    toks = eval_tokenizer(p, return_tensors="pt")
+    toks = tokenizer(p, return_tensors="pt")
     res = model.generate(
         **toks.to("cuda"),
         max_new_tokens=maxlen,
@@ -65,11 +56,15 @@ def gen(model, p, maxlen=100, sample=True):
         num_beams=1,
         top_p=0.95,
     ).to("cpu")
-    return eval_tokenizer.batch_decode(res, skip_special_tokens=True)
+    return tokenizer.batch_decode(res, skip_special_tokens=True)
+
+
+dataset = load_dataset(dataset_name)
+print(dataset)
+print(dataset["train"][0])
 
 
 index = 10
-
 prompt = dataset["test"][index]["dialogue"]
 summary = dataset["test"][index]["summary"]
 
@@ -81,10 +76,9 @@ res = gen(
     formatted_prompt,
     100,
 )
-# print(res[0])
 output = res[0].split("Output:\n")[1]
-
 dash_line = "-".join("" for x in range(100))
+
 print(dash_line)
 print(f"INPUT PROMPT:\n{formatted_prompt}")
 print(dash_line)
@@ -174,16 +168,19 @@ def preprocess_dataset(tokenizer: AutoTokenizer, max_length: int, seed, dataset)
 
     return dataset
 
+
 max_length = get_max_length(original_model)
 print(max_length)
+max_length = 512
 
-train_dataset = preprocess_dataset(tokenizer, max_length,seed, dataset['train'])
-eval_dataset = preprocess_dataset(tokenizer, max_length,seed, dataset['validation'])
+train_dataset = preprocess_dataset(tokenizer, max_length, seed, dataset["train"])
+eval_dataset = preprocess_dataset(tokenizer, max_length, seed, dataset["validation"])
 
 print(f"Shapes of the datasets:")
 print(f"Training: {train_dataset.shape}")
 print(f"Validation: {eval_dataset.shape}")
 print(train_dataset)
+
 
 def print_number_of_trainable_model_parameters(model):
     trainable_model_params = 0
@@ -194,20 +191,15 @@ def print_number_of_trainable_model_parameters(model):
             trainable_model_params += param.numel()
     return f"trainable model parameters: {trainable_model_params}\nall model parameters: {all_model_params}\npercentage of trainable model parameters: {100 * trainable_model_params / all_model_params:.2f}%"
 
+
 print(print_number_of_trainable_model_parameters(original_model))
 print(original_model)
 
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 config = LoraConfig(
-    r=32, #Rank
+    r=32,  # Rank
     lora_alpha=32,
-    target_modules=[
-        'q_proj',
-        'k_proj',
-        'v_proj',
-        'dense'
-    ],
+    target_modules=["q_proj", "k_proj", "v_proj", "dense"],
     bias="none",
     lora_dropout=0.05,  # Conventional
     task_type="CAUSAL_LM",
@@ -215,22 +207,18 @@ config = LoraConfig(
 
 # 1 - Enabling gradient checkpointing to reduce memory usage during fine-tuning
 original_model.gradient_checkpointing_enable()
-
 # 2 - Using the prepare_model_for_kbit_training method from PEFT
 original_model = prepare_model_for_kbit_training(original_model)
-
 peft_model = get_peft_model(original_model, config)
-
 print(print_number_of_trainable_model_parameters(peft_model))
 print(peft_model)
 
-output_dir = './peft-dialogue-summary-training/final-checkpoint'
-import transformers
+output_dir = "./logs"
 
 peft_training_args = TrainingArguments(
-    output_dir = output_dir,
-    warmup_steps=1,
-    per_device_train_batch_size=2,
+    output_dir=output_dir,
+    warmup_steps=500,
+    per_device_train_batch_size=1,
     gradient_accumulation_steps=4,
     max_steps=2000,
     learning_rate=2e-4,
@@ -243,21 +231,19 @@ peft_training_args = TrainingArguments(
     eval_steps=100,
     do_eval=True,
     gradient_checkpointing=True,
-    report_to="none",
-    overwrite_output_dir = 'True',
+    report_to=["tensorboard"],
+    overwrite_output_dir="True",
     group_by_length=True,
 )
 
 peft_model.config.use_cache = False
 
-peft_trainer = transformers.Trainer(
+peft_trainer = Trainer(
     model=peft_model,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
     args=peft_training_args,
-    data_collator=transformers.DataCollatorForLanguageModeling(tokenizer, mlm=False),
+    data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
 )
-
-peft_training_args.device
 
 peft_trainer.train()
